@@ -6,32 +6,28 @@ import 'dart:async';
 
 import 'package:stack_trace/stack_trace.dart';
 import 'package:stream_channel/stream_channel.dart';
-
+import 'package:web_socket_channel/web_socket_channel.dart';
 import 'exception.dart';
 import 'utils.dart';
 
 /// A JSON-RPC 2.0 client.
 ///
 /// A client calls methods on a server and handles the server's responses to
-/// those method calls. Methods can be called with [sendRequest], or with
-/// [sendNotification] if no response is expected.
+/// those method calls. Methods can be called with [call], or with
+/// [notif] if no response is expected.
 class Client {
-  final StreamChannel<dynamic> _channel;
 
   /// The next request id.
   var _id = 0;
-
-  /// The current batch of requests to be sent together.
-  ///
-  /// Each element is a JSON RPC spec compliant message.
-  List<Map<String, dynamic>>? _batch;
 
   /// The map of request ids to pending requests.
   final _pendingRequests = <int, _Request>{};
 
   final _subscriptions = <int, Subscription>{};
 
-  final _done = Completer<void>();
+  final StreamController<dynamic> statusStream = StreamController<dynamic>();
+
+  //final _done = Completer<void>();
 
   /// Returns a [Future] that completes when the underlying connection is
   /// closed.
@@ -39,67 +35,71 @@ class Client {
   /// This is the same future that's returned by [listen] and [close]. It may
   /// complete before [close] is called if the remote endpoint closes the
   /// connection.
-  Future get done => _done.future;
+  //Future get done => _done.future;
 
   /// Whether the underlying connection is closed.
   ///
   /// Note that this will be `true` before [close] is called if the remote
   /// endpoint closes the connection.
-  bool get isClosed => _done.isCompleted;
+  //bool get isClosed => _done.isCompleted;
 
-  /// Creates a [Client] that communicates over [channel].
-  ///
-  /// Note that the client won't begin listening to [responses] until
-  /// [Client.listen] is called.
-  Client(StreamChannel<String> channel)
-      : this.withoutJson(
-            jsonDocument.bind(channel).transformStream(ignoreFormatExceptions));
+  final Uri _uri;
 
-  /// Creates a [Client] that communicates using decoded messages over
-  /// [channel].
-  ///
-  /// Unlike [new Client], this doesn't read or write JSON strings. Instead, it
-  /// reads and writes decoded maps or lists.
-  ///
-  /// Note that the client won't begin listening to [responses] until
-  /// [Client.listen] is called.
-  Client.withoutJson(this._channel) {
-    done.whenComplete(() {
-      for (var request in _pendingRequests.values) {
-        request.completer.completeError(StateError(
-            'The client closed with pending request "${request.method}".'));
-      }
-      _pendingRequests.clear();
-    }).catchError((_) {
-      // Avoid an unhandled error.
-    });
+  bool _closed = false;
+
+  //WebSocketChannel _socket;
+  StreamChannel<dynamic>? _channel;
+
+  Client(this._uri) {
+    _connect();
   }
 
-  /// Starts listening to the underlying stream.
-  ///
-  /// Returns a [Future] that will complete when the connection is closed or
-  /// when it has an error. This is the same as [done].
-  ///
-  /// [listen] may only be called once.
-  Future listen() {
-    _channel.stream.listen(_handleResponse, onError: (error, stackTrace) {
-      _done.completeError(error, stackTrace);
-      _channel.sink.close();
-    }, onDone: () {
-      if (!_done.isCompleted) _done.complete();
-      close();
-    });
-    return done;
+  void _connect() {
+    var ws = WebSocketChannel.connect(_uri);
+    var wschannel = ws.cast<String>();
+    var channel = jsonDocument.bind(wschannel).transformStream(ignoreFormatExceptions);
+    _channel = channel;
+    statusStream.add({'status': 'connected'});
+    _handleChannel(channel);
+  }
+
+  void _handleChannel(final StreamChannel<dynamic> channel) {
+    channel.stream.listen(_handleResponse, 
+    onError: (error, stackTrace) async {
+      statusStream.addError(error, stackTrace);
+      await channel.sink.close();
+    }, onDone: () async {
+        if(_closed) {
+          _cleanup();
+          return;
+        }
+        statusStream.add({'status': 'reconnecting'});
+        await Future.delayed(Duration(seconds: 2));
+        //reconnect here
+        _connect();
+    }, cancelOnError: true);
   }
 
   /// Closes the underlying connection.
-  ///
-  /// Returns a [Future] that completes when all resources have been released.
-  /// This is the same as [done].
-  Future close() {
-    _channel.sink.close();
-    if (!_done.isCompleted) _done.complete();
-    return done;
+  void close() {
+    if (!_closed) {
+      _closed = true;
+      _channel?.sink.close();
+    }
+    return;
+  }
+
+  void _cleanup() {
+    for (var subscription in _subscriptions.values) {
+      subscription.stream.close();
+    }
+    _subscriptions.clear();
+
+    for (var request in _pendingRequests.values) {
+        request.completer.completeError(StateError(
+            'The client closed with pending request "${request.method}".'));
+    }
+    _pendingRequests.clear();
   }
 
   /// Sends a JSON-RPC 2 request to invoke the given [method].
@@ -115,7 +115,7 @@ class Client {
   ///
   /// Throws a [StateError] if the client is closed while the request is in
   /// flight, or if the client is closed when this method is called.
-  Future sendRequest(String method, [parameters]) {
+  Future call(String method, [parameters]) {
     var id = _id++;
     _send(method, parameters, id);
 
@@ -124,7 +124,7 @@ class Client {
     return completer.future;
   }
 
-  Subscription createSubscription(String method, [parameters]) {
+  Subscription subscribe(String method, [parameters]) {
     var id = _id++;
     var subscription = Subscription(this, id, method, parameters);
     return subscription;
@@ -143,7 +143,7 @@ class Client {
   /// send a response, it has no return value.
   ///
   /// Throws a [StateError] if the client is closed when this method is called.
-  void sendNotification(String method, [parameters]) =>
+  void notif(String method, [parameters]) =>
       _send(method, parameters);
 
   /// A helper method for [sendRequest] and [sendNotification].
@@ -156,39 +156,13 @@ class Client {
       throw ArgumentError('Only maps and lists may be used as JSON-RPC '
           'parameters, was "$parameters".');
     }
-    if (isClosed) throw StateError('The client is closed.');
+    if (_closed) throw StateError('The client is closed.');
 
     var message = <String, dynamic>{'jsonrpc': '2.0', 'method': method};
     if (id != null) message['id'] = id;
     if (parameters != null) message['params'] = parameters;
 
-    if (_batch != null) {
-      _batch!.add(message);
-    } else {
-      _channel.sink.add(message);
-    }
-  }
-
-  /// Runs [callback] and batches any requests sent until it returns.
-  ///
-  /// A batch of requests is sent in a single message on the underlying stream,
-  /// and the responses are likewise sent back in a single message.
-  ///
-  /// [callback] may be synchronous or asynchronous. If it returns a [Future],
-  /// requests will be batched until that Future returns; otherwise, requests
-  /// will only be batched while synchronously executing [callback].
-  ///
-  /// If this is called in the context of another [withBatch] call, it just
-  /// invokes [callback] without creating another batch. This means that
-  /// responses are batched until the first batch ends.
-  void withBatch(Function() callback) {
-    if (_batch != null) return callback();
-
-    _batch = [];
-    return tryFinally(callback, () {
-      _channel.sink.add(_batch);
-      _batch = null;
-    });
+    _channel?.sink.add(message);
   }
 
   /// Handles a decoded response from the server.

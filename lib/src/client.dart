@@ -29,6 +29,8 @@ class Client {
   /// The map of request ids to pending requests.
   final _pendingRequests = <int, _Request>{};
 
+  final _subscriptions = <int, Subscription>{};
+
   final _done = Completer<void>();
 
   /// Returns a [Future] that completes when the underlying connection is
@@ -122,6 +124,13 @@ class Client {
     return completer.future;
   }
 
+  Subscription createSubscription(String method, [parameters]) {
+    var id = _id++;
+    var subscription = Subscription(this, id, method, parameters);
+    return subscription;
+  }
+
+
   /// Sends a JSON-RPC 2 request to invoke the given [method] without expecting
   /// a response.
   ///
@@ -197,6 +206,15 @@ class Client {
     if (!_isResponseValid(response)) return;
     var id = response['id'];
     id = (id is String) ? int.parse(id) : id;
+
+    if (_subscriptions.containsKey(id)) {
+      if (response.containsKey('result')) {
+        var sub = _subscriptions[id];
+        sub?.stream.add(response['result']);
+      }
+      return;
+    }
+
     var request = _pendingRequests.remove(id)!;
     if (response.containsKey('result')) {
       request.completer.complete(response['result']);
@@ -214,7 +232,7 @@ class Client {
     if (response['jsonrpc'] != '2.0') return false;
     var id = response['id'];
     id = (id is String) ? int.parse(id) : id;
-    if (!_pendingRequests.containsKey(id)) return false;
+    // if (!_pendingRequests.containsKey(id)) return false;
     if (response.containsKey('result')) return true;
 
     if (!response.containsKey('error')) return false;
@@ -238,4 +256,29 @@ class _Request {
   final Chain chain;
 
   _Request(this.method, this.completer, this.chain);
+}
+
+
+class Subscription {
+  
+  StreamController stream = StreamController();
+
+  final Client _cli;
+  final int _id;
+  final String _method;
+
+  Subscription(Client cli, int id, String method, [parameters]) :
+    _cli = cli,
+    _id = id,
+    _method = method
+  {
+    _cli._send(_method + '_subscribe', parameters, _id);
+    _cli._subscriptions[_id] = this;
+  }
+
+  void close() {
+    _cli._send(_method+'_unsubscribe', null, _id);
+    _cli._subscriptions.remove(_id);
+  }
+
 }

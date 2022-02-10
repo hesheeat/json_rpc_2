@@ -8,6 +8,7 @@ environment:
   sdk: ">=2.12.0 <3.0.0"
 
 dependencies:
+  uuid: ^3.0.5
   stack_trace: ^1.10.0
   stream_channel: ^2.1.0
   web_socket_channel: ^2.0.0

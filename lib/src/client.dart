@@ -7,6 +7,7 @@ import 'dart:async';
 import 'package:stack_trace/stack_trace.dart';
 import 'package:stream_channel/stream_channel.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:uuid/uuid.dart';
 import 'exception.dart';
 import 'utils.dart';
 
@@ -16,16 +17,14 @@ import 'utils.dart';
 /// those method calls. Methods can be called with [call], or with
 /// [notif] if no response is expected.
 class Client {
-
-  /// The next request id.
-  var _id = 0;
-
   /// The map of request ids to pending requests.
-  final _pendingRequests = <int, _Request>{};
+  final _pendingRequests = <String, _Request>{};
 
-  final _subscriptions = <int, Subscription>{};
+  final _subscriptions = <String, Subscription>{};
 
   final StreamController<dynamic> statusStream = StreamController<dynamic>();
+
+  final idGen = Uuid();
 
   //final _done = Completer<void>();
 
@@ -55,28 +54,38 @@ class Client {
   }
 
   void _connect() {
+    print('do connect $_uri');
     var ws = WebSocketChannel.connect(_uri);
     var wschannel = ws.cast<String>();
-    var channel = jsonDocument.bind(wschannel).transformStream(ignoreFormatExceptions);
+    var channel =
+        jsonDocument.bind(wschannel).transformStream(ignoreFormatExceptions);
     _channel = channel;
-    statusStream.add({'status': 'connected'});
+    // statusStream.add({'status': 'connected'});
     _handleChannel(channel);
   }
 
   void _handleChannel(final StreamChannel<dynamic> channel) {
-    channel.stream.listen(_handleResponse, 
-    onError: (error, stackTrace) async {
+    final tryReconnect = () async {
+      if (_closed) {
+        _cleanup();
+        return;
+      }
+      statusStream.add({'status': 'reconnecting'});
+      await Future.delayed(Duration(seconds: 2));
+      //reconnect here
+      _connect();
+    };
+
+    channel.stream.listen(_handleResponse, onError: (error, stackTrace) async {
+      print('onError $error');
       statusStream.addError(error, stackTrace);
       await channel.sink.close();
+      if (error is WebSocketChannelException) {
+        await tryReconnect();
+      }
     }, onDone: () async {
-        if(_closed) {
-          _cleanup();
-          return;
-        }
-        statusStream.add({'status': 'reconnecting'});
-        await Future.delayed(Duration(seconds: 2));
-        //reconnect here
-        _connect();
+      print('onDone');
+      await tryReconnect();
     }, cancelOnError: true);
   }
 
@@ -91,13 +100,13 @@ class Client {
 
   void _cleanup() {
     for (var subscription in _subscriptions.values) {
-      subscription.stream.close();
+      subscription.close();
     }
     _subscriptions.clear();
 
     for (var request in _pendingRequests.values) {
-        request.completer.completeError(StateError(
-            'The client closed with pending request "${request.method}".'));
+      request.completer.completeError(StateError(
+          'The client closed with pending request "${request.method}".'));
     }
     _pendingRequests.clear();
   }
@@ -116,7 +125,7 @@ class Client {
   /// Throws a [StateError] if the client is closed while the request is in
   /// flight, or if the client is closed when this method is called.
   Future call(String method, [parameters]) {
-    var id = _id++;
+    var id = idGen.v4();
     _send(method, parameters, id);
 
     var completer = Completer.sync();
@@ -124,12 +133,11 @@ class Client {
     return completer.future;
   }
 
-  Subscription subscribe(String method, [parameters]) {
-    var id = _id++;
-    var subscription = Subscription(this, id, method, parameters);
-    return subscription;
+  Future<Subscription> subscribe(String method, [parameters]) async {
+    final sub = Subscription(this);
+    await sub.subscribe(method, parameters);
+    return sub;
   }
-
 
   /// Sends a JSON-RPC 2 request to invoke the given [method] without expecting
   /// a response.
@@ -143,14 +151,13 @@ class Client {
   /// send a response, it has no return value.
   ///
   /// Throws a [StateError] if the client is closed when this method is called.
-  void notif(String method, [parameters]) =>
-      _send(method, parameters);
+  void notif(String method, [parameters]) => _send(method, parameters);
 
   /// A helper method for [sendRequest] and [sendNotification].
   ///
   /// Sends a request to invoke [method] with [parameters]. If [id] is given,
   /// the request uses that id.
-  void _send(String method, parameters, [int? id]) {
+  void _send(String method, parameters, [String? id]) {
     if (parameters is Iterable) parameters = parameters.toList();
     if (parameters is! Map && parameters is! List && parameters != null) {
       throw ArgumentError('Only maps and lists may be used as JSON-RPC '
@@ -162,11 +169,14 @@ class Client {
     if (id != null) message['id'] = id;
     if (parameters != null) message['params'] = parameters;
 
+    print('send $message');
+
     _channel?.sink.add(message);
   }
 
   /// Handles a decoded response from the server.
   void _handleResponse(response) {
+    print('_handleResponse $response');
     if (response is List) {
       response.forEach(_handleSingleResponse);
     } else {
@@ -178,17 +188,18 @@ class Client {
   /// resolved.
   void _handleSingleResponse(response) {
     if (!_isResponseValid(response)) return;
-    var id = response['id'];
-    id = (id is String) ? int.parse(id) : id;
 
-    if (_subscriptions.containsKey(id)) {
-      if (response.containsKey('result')) {
-        var sub = _subscriptions[id];
-        sub?.stream.add(response['result']);
+    if (response.containsKey('params')) {
+      final params = response['params'] as Map;
+      if (params.containsKey('subscription')) {
+        final subId = params['subscription'] as String;
+        final sub = _subscriptions[subId];
+        sub?._sc.add(params['result']);
       }
       return;
     }
 
+    var id = response['id'];
     var request = _pendingRequests.remove(id)!;
     if (response.containsKey('result')) {
       request.completer.complete(response['result']);
@@ -204,10 +215,10 @@ class Client {
   bool _isResponseValid(response) {
     if (response is! Map) return false;
     if (response['jsonrpc'] != '2.0') return false;
-    var id = response['id'];
-    id = (id is String) ? int.parse(id) : id;
+    // var id = response['id'];
     // if (!_pendingRequests.containsKey(id)) return false;
-    if (response.containsKey('result')) return true;
+    if (response.containsKey('result')) return true; //for callback
+    if (response.containsKey('params')) return true; //for subscription
 
     if (!response.containsKey('error')) return false;
     var error = response['error'];
@@ -232,27 +243,32 @@ class _Request {
   _Request(this.method, this.completer, this.chain);
 }
 
-
 class Subscription {
-  
-  StreamController stream = StreamController();
-
+  final StreamController<dynamic> _sc = StreamController<dynamic>();
   final Client _cli;
-  final int _id;
-  final String _method;
 
-  Subscription(Client cli, int id, String method, [parameters]) :
-    _cli = cli,
-    _id = id,
-    _method = method
-  {
-    _cli._send(_method + '_subscribe', parameters, _id);
-    _cli._subscriptions[_id] = this;
+  String? _subId;
+  String? _method;
+
+  Subscription(Client cli) : _cli = cli;
+
+  Future subscribe(String method, [parameters]) async {
+    final rst = await _cli.call(method + '_subscribe', parameters);
+    _subId = rst as String; //return rst is subscription id
+    _method = method;
+    _cli._subscriptions[rst] = this;
+  }
+
+  Future unsubscribe() async {
+    if (_subId != null) {
+      await _cli.call(_method! + '_unsubscribe', [_subId]);
+      _cli._subscriptions.remove(_subId);
+    }
   }
 
   void close() {
-    _cli._send(_method+'_unsubscribe', null, _id);
-    _cli._subscriptions.remove(_id);
+    _sc.close();
   }
 
+  Stream<dynamic> get stream => _sc.stream;
 }

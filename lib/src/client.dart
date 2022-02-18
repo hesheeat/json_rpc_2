@@ -154,9 +154,9 @@ class Client {
     return completer.future;
   }
 
-  Future<Subscription> subscribe(String method, [parameters]) async {
+  Subscription subscribe(String method, [parameters]) {
     final sub = Subscription(this, method, parameters);
-    await sub.subscribe();
+    sub.subscribe();
     return sub;
   }
 
@@ -263,16 +263,18 @@ class Subscription {
 
   Subscription(this._cli, this._method, this._parameters);
 
-  Future subscribe() async {
-    final rst = await _cli.call(_method + '_subscribe', _parameters);
-    _subId = rst as String; //return rst is subscription id
-    _cli._subscriptions[rst] = this;
+  void subscribe() {
+    _cli.call(_method + '_subscribe', _parameters).then((rst) {
+      _subId = rst as String; //return rst is subscription id
+      _cli._subscriptions[rst] = this;
+    });
   }
 
-  Future unsubscribe() async {
+  void unsubscribe() {
     if (_subId != null) {
-      await _cli.call(_method + '_unsubscribe', [_subId]);
-      _cli._subscriptions.remove(_subId);
+      _cli.call(_method + '_unsubscribe', [_subId]).then((rst) {
+        _cli._subscriptions.remove(_subId);
+      });
     }
   }
 

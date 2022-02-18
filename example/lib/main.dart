@@ -17,7 +17,7 @@ void main() async {
     print(event);
   });
 
-  sub = await client.subscribe('kiosk', ['queueingSync']);
+  sub = client.subscribe('kiosk', ['queueingSync']);
 
   sub!.stream.listen((event) {
     print(event);

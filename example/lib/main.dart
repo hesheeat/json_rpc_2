@@ -5,13 +5,13 @@ late Client client;
 Subscription? sub;
 
 void main() async {
-  client = Client(
+  client = Client();
+
+  client.connect(
     Uri.parse('ws://localhost:15566/kpi/wsrpc'),
     reconnectInternal: const Duration(seconds: 2),
     connectTimeout: const Duration(seconds: 2),
   );
-
-  client.connect();
 
   client.statusStream.listen((event) {
     print(event);

@@ -1,17 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:json_rpc_2/json_rpc_2.dart';
 
-Client? client;
+late Client client;
 Subscription? sub;
 
 void main() async {
-  client = Client(Uri.parse('ws://localhost:15566/kpi/wsrpc'));
+  client = Client(
+    Uri.parse('ws://localhost:15566/kpi/wsrpc'),
+    reconnectInternal: const Duration(seconds: 2),
+    connectTimeout: const Duration(seconds: 2),
+  );
 
-  client!.statusStream.stream.listen((event) {
+  client.connect();
+
+  client.statusStream.listen((event) {
     print(event);
   });
 
-  sub = await client!.subscribe('kiosk', ['queueingSync']);
+  sub = await client.subscribe('kiosk', ['queueingSync']);
 
   sub!.stream.listen((event) {
     print(event);

@@ -54,49 +54,56 @@ class Client {
 
   StreamChannel<dynamic>? _channel;
 
-  final Uri uri;
-  final Duration? reconnectInternal;
-  final Duration? connectTimeout;
-
-  Client(this.uri, {this.reconnectInternal, this.connectTimeout});
-
-  void connect() {
-    _closed = false;
-    _connect();
+  void connect(Uri uri,
+      {Duration? reconnectInternal, Duration? connectTimeout}) {
+    if (_channel != null) {
+      _channel?.sink.close();
+      _channel = null;
+    }
+    _connect(uri,
+        reconnectInternal: reconnectInternal, connectTimeout: connectTimeout);
   }
 
-  void _connect() {
+  void _connect(Uri uri,
+      {Duration? reconnectInternal, Duration? connectTimeout}) {
     final ws = WebSocketChannel.connect(uri, connectTimeout: connectTimeout);
     ws.ready.then((_) {
       final wschannel = ws.cast<String>();
       final channel =
           jsonDocument.bind(wschannel).transformStream(ignoreFormatExceptions);
-      _handleChannel(channel);
+      _handleChannel(channel, uri,
+          reconnectInternal: reconnectInternal, connectTimeout: connectTimeout);
     }, onError: (err) {
-      print('connect err $err');
-      _reconnect();
+      _reconnect(uri,
+          reconnectInternal: reconnectInternal, connectTimeout: connectTimeout);
     });
   }
 
-  void _reconnect() {
+  void _reconnect(Uri uri,
+      {Duration? reconnectInternal, Duration? connectTimeout}) {
     if (reconnectInternal != null && !_closed) {
       _statusController.add(Status.reconnecting);
-      Future.delayed(reconnectInternal!).then((_) => _connect());
+      Future.delayed(reconnectInternal).then((_) => _connect(uri,
+          reconnectInternal: reconnectInternal,
+          connectTimeout: connectTimeout));
     } else {
       _cleanup();
       _statusController.add(Status.disconnected);
     }
   }
 
-  void _handleChannel(StreamChannel channel) {
+  void _handleChannel(StreamChannel channel, Uri uri,
+      {Duration? reconnectInternal, Duration? connectTimeout}) {
     _channel = channel;
-
-    //resubscribe all
+    _statusController.add(Status.connected);
+    print('_subscriptions all ${_subscriptions.length}');
     for (var subscription in _subscriptions.values) {
       subscription.subscribe();
     }
+
+    print('_pendingMessages all ${_pendingMessages.length}');
     for (var msg in _pendingMessages) {
-      log('send pending $msg');
+      print('send pending $msg');
       _channel?.sink.add(msg);
     }
     _pendingMessages.clear();
@@ -104,7 +111,8 @@ class Client {
     channel.stream.listen(_handleData, onDone: () {
       channel.sink.close();
       _channel = null;
-      _reconnect();
+      _reconnect(uri,
+          reconnectInternal: reconnectInternal, connectTimeout: connectTimeout);
     }, onError: (error, stackTrace) {
       _statusController.addError(error, stackTrace);
     });
@@ -121,6 +129,7 @@ class Client {
   }
 
   void _cleanup() {
+    print('_cleanup');
     for (var subscription in _subscriptions.values) {
       subscription.close();
     }
@@ -147,6 +156,7 @@ class Client {
   /// Throws a [StateError] if the client is closed while the request is in
   /// flight, or if the client is closed when this method is called.
   Future call(String method, [parameters]) {
+    print('call $method');
     var id = _idGen.v4();
     _send(method, parameters, id);
     var completer = Completer.sync();
@@ -173,18 +183,17 @@ class Client {
     var message = <String, dynamic>{'jsonrpc': '2.0', 'method': method};
     if (id != null) message['id'] = id;
     if (parameters != null) message['params'] = parameters;
-
     if (_channel == null) {
+      print('pending $message');
       _pendingMessages.add(message);
     } else {
-      log('send $message');
+      print('sending $message');
       _channel?.sink.add(message);
     }
   }
 
   /// Handles a decoded response from the server.
   void _handleData(response) {
-    log('_handleResponse $response');
     if (response is List) {
       response.forEach(_handleSingleResponse);
     } else {
@@ -264,10 +273,14 @@ class Subscription {
   Subscription(this._cli, this._method, this._parameters);
 
   void subscribe() {
-    _cli.call(_method + '_subscribe', _parameters).then((rst) {
-      _subId = rst as String; //return rst is subscription id
-      _cli._subscriptions[rst] = this;
-    });
+    try {
+      _cli.call(_method + '_subscribe', _parameters).then((rst) {
+        _subId = rst as String; //return rst is subscription id
+        _cli._subscriptions[rst] = this;
+      });
+    } catch (err) {
+      print('call $err');
+    }
   }
 
   void unsubscribe() {

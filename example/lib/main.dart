@@ -8,7 +8,7 @@ void main() async {
   client = Client();
 
   client.connect(
-    Uri.parse('ws://localhost:15566/kpi/wsrpc'),
+    Uri.parse('ws://localhost:15566/gpi/wsrpc'),
     reconnectInternal: const Duration(seconds: 2),
     connectTimeout: const Duration(seconds: 2),
   );
@@ -17,7 +17,12 @@ void main() async {
     print(event);
   });
 
-  sub = client.subscribe('kiosk', ['queueingSync']);
+  final input = {"shopId": "133152369239138304"};
+
+  sub = client.subscribe('gpi', [
+    'queueingSync',
+    input,
+  ]);
 
   sub!.stream.listen((event) {
     print(event);

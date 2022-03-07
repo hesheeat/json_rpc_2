@@ -74,6 +74,8 @@ class Client {
       _handleChannel(channel, uri,
           reconnectInternal: reconnectInternal, connectTimeout: connectTimeout);
     }, onError: (err) {
+      print('connect ready err $err');
+      ws.sink.close();
       _reconnect(uri,
           reconnectInternal: reconnectInternal, connectTimeout: connectTimeout);
     });
@@ -82,13 +84,14 @@ class Client {
   void _reconnect(Uri uri,
       {Duration? reconnectInternal, Duration? connectTimeout}) {
     if (reconnectInternal != null && !_closed) {
+      print('reconnect after $reconnectInternal');
       _statusController.add(Status.reconnecting);
       Future.delayed(reconnectInternal).then((_) => _connect(uri,
           reconnectInternal: reconnectInternal,
           connectTimeout: connectTimeout));
     } else {
       _cleanup();
-      _statusController.add(Status.disconnected);
+      _statusController.add(Status.closed);
     }
   }
 
@@ -109,8 +112,10 @@ class Client {
     _pendingMessages.clear();
 
     channel.stream.listen(_handleData, onDone: () {
-      channel.sink.close();
+      print('channel done');
+      _channel?.sink.close();
       _channel = null;
+      _statusController.add(Status.disconnected);
       _reconnect(uri,
           reconnectInternal: reconnectInternal, connectTimeout: connectTimeout);
     }, onError: (error, stackTrace) {
@@ -273,20 +278,20 @@ class Subscription {
   Subscription(this._cli, this._method, this._parameters);
 
   void subscribe() {
-    try {
-      _cli.call(_method + '_subscribe', _parameters).then((rst) {
-        _subId = rst as String; //return rst is subscription id
-        _cli._subscriptions[rst] = this;
-      });
-    } catch (err) {
-      print('call $err');
-    }
+    _cli.call(_method + '_subscribe', _parameters).then((rst) {
+      _subId = rst as String; //return rst is subscription id
+      _cli._subscriptions[rst] = this;
+    }, onError: (err) {
+      print('subscribe err $err');
+    });
   }
 
   void unsubscribe() {
     if (_subId != null) {
       _cli.call(_method + '_unsubscribe', [_subId]).then((rst) {
         _cli._subscriptions.remove(_subId);
+      }, onError: (err) {
+        print('unsubscribe err $err');
       });
     }
   }

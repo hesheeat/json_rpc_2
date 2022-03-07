@@ -45,7 +45,7 @@ class Client {
 
   final _subscriptions = <String, Subscription>{};
 
-  final _statusController = StreamController<Status>();
+  final _statusController = StreamController<Status>(sync: true);
 
   /// Stream status for status update
   Stream<Status> get statusStream => _statusController.stream;
